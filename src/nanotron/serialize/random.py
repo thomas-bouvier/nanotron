@@ -5,12 +5,14 @@ import torch
 from nanotron import distributed as dist
 from nanotron.parallel import ParallelContext
 from nanotron.random import RandomStates
+from nanotron.serialize import CheckpointEngine
 
 
 def save_random_states(
     random_states: RandomStates,
     parallel_context: ParallelContext,
     root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
 ):
     """All processes save their own random state"""
     filename = (
@@ -20,8 +22,8 @@ def save_random_states(
     )
     filename.parent.mkdir(exist_ok=True, parents=True)
 
-    # TODO @thomasw21: That's annothing but this actually uses pickle, we might need to change that for something else
-    torch.save(random_states, filename)
+    # TODO @thomasw21: That's annoying but this actually uses pickle, we might need to change that for something else
+    checkpoint_engine.save_unsafe(random_states, filename)
 
 
 def load_random_states(parallel_context: ParallelContext, root_folder: Path):
@@ -32,7 +34,5 @@ def load_random_states(parallel_context: ParallelContext, root_folder: Path):
         / f"tp-{dist.get_rank(parallel_context.tp_pg)}-of-{parallel_context.tp_pg.size()}_dp-{dist.get_rank(parallel_context.dp_pg)}-of-{parallel_context.dp_pg.size()}_pp-{dist.get_rank(parallel_context.pp_pg)}-of-{parallel_context.pp_pg.size()}.pt"
     )
 
-    # TODO @thomasw21: That's annothing but this actually uses pickle, we might need to change that for something else
-    state = torch.load(filename)
-
-    return state
+    # TODO @thomasw21: That's annoying but this actually uses pickle, we might need to change that for something else
+    return checkpoint_engine.load_unsafe(filename)

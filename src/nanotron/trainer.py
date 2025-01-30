@@ -93,6 +93,11 @@ from nanotron.serialize import (
     save,
     save_random_states,
 )
+from nanotron.serialize.engine import (
+    TorchCheckpointEngine,
+    DataStatesCheckpointEngine,
+    create_checkpoint_engine_class,
+)
 from nanotron.serialize.metadata import DataStageMetadata, TrainingMetadata
 from nanotron.serialize.optimizer import load_optimizer, state_dict_to_device
 
@@ -136,6 +141,8 @@ class DistributedTrainer:
             config_or_config_file, config_class=config_class, model_config_class=model_config_class
         )
         self.model_config = self.config.model.model_config
+        self.checkpoint_engine_type = self.config.checkpoints.checkpointing_engine if self.config.checkpoints else CheckpointingEngineType.TORCH
+
         if model_class is not None:
             CONFIG_TO_MODEL_CLASS[self.model_config.__class__.__name__] = model_class
 
@@ -160,6 +167,21 @@ class DistributedTrainer:
         if os.environ.get("NANOTRON_BENCHMARK", "0") == "1":
             log_throughput(self.config, self.parallel_context)
 
+        try:
+            self.checkpoint_engine = create_checkpoint_engine_class(self.checkpoint_engine_type)(
+                # TODO @tbouvier: make it generic to all checkpointing engines
+                config=self.config.datastates if self.config.datastates else None
+            )
+        except ImportError as e:
+            log_rank(
+                f"Got error: {e}. The checkpointing engine will fall back to slow torch.save().",
+                logger=logger,
+                level=logging.ERROR,
+                rank=0,
+            )
+            # TODO tbouvier: same
+            self.checkpoint_engine = TorchCheckpointEngine(config=self.config.datastates if self.config.datastates else None)
+
         ########################################
         ## Setting up our model, optimizers, schedulers, etc.
         ########################################
@@ -169,7 +191,8 @@ class DistributedTrainer:
 
         # Init model and build on pp ranks
         self.random_states = init_random_states(
-            parallel_config=self.config.parallelism, tp_pg=self.parallel_context.tp_pg
+            parallel_config=self.config.parallelism,
+            tp_pg=self.parallel_context.tp_pg,
         )
         self.model = self.init_model()  # Defines self.model
         self.unwrapped_model: NanotronModel = (
@@ -195,6 +218,7 @@ class DistributedTrainer:
                 optimizer=self.optimizer,
                 parallel_context=self.parallel_context,
                 root_folder=self.init_checkpoint_path,
+                checkpoint_engine=self.checkpoint_engine,
                 param_shard_metadata=self.param_shard_metadata,
                 model=self.unwrapped_model,
                 map_location="cpu",
@@ -212,6 +236,7 @@ class DistributedTrainer:
                 is_zero=self.config.optimizer.zero_stage,
                 parallel_context=self.parallel_context,
                 root_folder=self.init_checkpoint_path,
+                checkpoint_engine=self.checkpoint_engine,
             )
 
         # Define iteration start state
@@ -564,6 +589,10 @@ class DistributedTrainer:
             self.config, self.parallel_context, self.unwrapped_model, self.grad_accumulator, self.optimizer
         )
 
+        # If using an asynchronous engine, the following call makes sure that
+        # copies are completed before proceeding with the model update.
+        self.checkpoint_engine.wait()
+
         # Apply gradient
         self.optimizer.step()
         self.optimizer.zero_grad()
@@ -740,6 +769,7 @@ class DistributedTrainer:
                     model=unwrapped_model,
                     parallel_context=self.parallel_context,
                     root_folder=self.init_checkpoint_path,
+                    checkpoint_engine=self.checkpoint_engine,
                 )
             reloaded_from_checkpoint = True
         if not reloaded_from_checkpoint:
@@ -750,6 +780,7 @@ class DistributedTrainer:
                     model=unwrapped_model,
                     parallel_context=self.parallel_context,
                     root_folder=self.config.model.init_method.path,
+                    checkpoint_engine=self.checkpoint_engine,
                 )
             elif isinstance(self.config.model.init_method, (RandomInit, SpectralMupInit)):
                 unwrapped_model.init_model_randomly(config=self.config)
@@ -906,6 +937,7 @@ class DistributedTrainer:
 
         save(
             model=self.unwrapped_model,
+            checkpoint_engine=self.checkpoint_engine,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
             should_save_model=bool(
@@ -922,7 +954,10 @@ class DistributedTrainer:
             config=self.config,
         )
         save_random_states(
-            random_states=self.random_states, parallel_context=self.parallel_context, root_folder=checkpoint_path
+            random_states=self.random_states,
+            parallel_context=self.parallel_context,
+            root_folder=checkpoint_path,
+            checkpoint_engine=self.checkpoint_engine,
         )
         with open(checkpoints_path / "latest.txt", mode="w") as fo:
             fo.write(f"{self.iteration_step}")

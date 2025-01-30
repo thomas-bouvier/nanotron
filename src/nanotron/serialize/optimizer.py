@@ -19,6 +19,7 @@ from nanotron.optim.zero import (
 )
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter
+from nanotron.serialize.engine import CheckpointEngine
 from nanotron.serialize.metadata import TensorMetadata
 from nanotron.serialize.utils import ObjectType, merge_and_shard_tp_tensors
 
@@ -42,6 +43,7 @@ def save_optimizer(
     optimizer: optim.BaseOptimizer,
     parallel_context: ParallelContext,
     root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
 ):
     """Saves optimizer states
     - If Zero-0 is used, optimizer states are replicated across all DPs. Only DP-0 saves the states
@@ -98,8 +100,7 @@ def save_optimizer(
 
             json.dump(config, fo)
 
-    # We dump the optimizer state using `torch.save`
-    torch.save(
+    checkpoint_engine.save_unsafe(
         optimizer.state_dict(),
         root_folder
         / optimizer_filename(parallel_context, is_zero=optimizer.inherit_from(optim.ZeroDistributedOptimizer)),
@@ -111,6 +112,7 @@ def save_lr_scheduler(
     is_zero,
     parallel_context: ParallelContext,
     root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
 ):
     """Saves lr scheduler states"""
     if not is_zero and dist.get_rank(parallel_context.dp_pg) > 0:
@@ -120,8 +122,7 @@ def save_lr_scheduler(
     root_folder = root_folder / "lr_scheduler"
     root_folder.mkdir(exist_ok=True, parents=True)
 
-    # We dump the optimizer state using `torch.save`
-    torch.save(
+    checkpoint_engine.save_unsafe(
         lr_scheduler.state_dict(),
         root_folder / lr_scheduler_filename(parallel_context, is_zero),
     )
@@ -150,6 +151,7 @@ def load_optimizer(
     optimizer: optim.BaseOptimizer,
     parallel_context: ParallelContext,
     root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
     map_location: Optional[str] = None,
     param_shard_metadata: Tuple[Tuple[int, int], TensorMetadata] = None,  # (pp_rank, tp_rank) -> TensorMetadata
     model: Optional[nn.Module] = None,
@@ -331,7 +333,7 @@ def load_optimizer(
         state_dict = new_optim_state_dict
     else:
         # TODO @thomasw21: Load optimizer type and check that it's compatible otherwise we might be be loading something else completely
-        state_dict = torch.load(
+        state_dict = checkpoint_engine.load_unsafe(
             root_folder
             / optimizer_filename(parallel_context, is_zero=optimizer.inherit_from(optim.ZeroDistributedOptimizer)),
             map_location=map_location,
@@ -362,9 +364,10 @@ def load_lr_scheduler(
     is_zero,
     parallel_context: ParallelContext,
     root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
 ):
     root_folder = root_folder / "lr_scheduler"
 
-    state_dict = torch.load(root_folder / lr_scheduler_filename(parallel_context, is_zero))
+    state_dict = checkpoint_engine.load_unsafe(root_folder / lr_scheduler_filename(parallel_context, is_zero))
     lr_scheduler.load_state_dict(state_dict)
     lr_scheduler._initial_step()  # NOTE: this is required to set the initial learning rate

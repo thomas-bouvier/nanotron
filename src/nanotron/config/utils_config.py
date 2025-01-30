@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+from nanotron.config.checkpoints_config import CheckpointingEngineType
 from nanotron.generation.sampler import SamplerType
 from nanotron.parallel.pipeline_parallel.engine import (
     AllForwardAllBackwardPipelineEngine,
@@ -33,6 +34,8 @@ def serialize(data) -> dict:
             result[field.name] = serialize(value)
         elif isinstance(value, Path):
             result[field.name] = str(value)
+        elif isinstance(value, CheckpointingEngineType):
+            result[field.name] = value.name
         elif isinstance(value, PipelineEngine):
             result[field.name] = cast_pipeline_engine_to_str(value)
         elif isinstance(value, TensorParallelLinearMode):

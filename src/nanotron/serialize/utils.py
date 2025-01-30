@@ -7,6 +7,7 @@ import torch
 
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import SlicesPair
+from nanotron.serialize.engine import CheckpointEngine
 from nanotron.serialize.metadata import TensorMetadata
 
 
@@ -32,6 +33,7 @@ def get_path(
     type: ObjectType,
     exp_tp_pp_rank_and_size: Tuple[Tuple[int, int], Tuple[int, int]],
     is_expert_sharded: bool,
+    checkpoint_engine: CheckpointEngine,
     prefix: Optional[Path] = None,
 ) -> List[str]:
     suffix = tensor_name.split(".")
@@ -42,13 +44,13 @@ def get_path(
         (exp_rank, exp_size), (tp_rank, tp_size), (pp_rank, pp_size) = exp_tp_pp_rank_and_size
         if not is_expert_sharded or exp_size == 1:
             suffix_name = (
-                f"{type.value}_{suffix_name}_pp-rank-{pp_rank}-of-{pp_size}_tp-rank-{tp_rank}-of-{tp_size}.safetensors"
+                f"{type.value}_{suffix_name}_pp-rank-{pp_rank}-of-{pp_size}_tp-rank-{tp_rank}-of-{tp_size}.{checkpoint_engine.TENSOR_SUFFIX}"
             )
         else:
             # We only show exp_rank if tensor is exp_sharded and exp_size > 1
-            suffix_name = f"{type.value}_{suffix_name}_pp-rank-{pp_rank}-of-{pp_size}_tp-rank-{tp_rank}-of-{tp_size}_exp-rank-{exp_rank}-of-{exp_size}.safetensors"
+            suffix_name = f"{type.value}_{suffix_name}_pp-rank-{pp_rank}-of-{pp_size}_tp-rank-{tp_rank}-of-{tp_size}_exp-rank-{exp_rank}-of-{exp_size}.{checkpoint_engine.TENSOR_SUFFIX}"
     else:
-        suffix_name = f"{type.value}_{suffix_name}.safetensors"
+        suffix_name = f"{type.value}_{suffix_name}.{checkpoint_engine.TENSOR_SUFFIX}"
 
     suffix_path.append(suffix_name)
     if prefix is None:

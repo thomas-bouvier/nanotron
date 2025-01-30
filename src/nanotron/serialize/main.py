@@ -20,6 +20,7 @@ from nanotron.sanity_checks import (
     assert_tensor_synced_across_pg,
     check_optim_state_in_sync,
 )
+from nanotron.serialize.engine import CheckpointEngine, get_checkpoint_engine_type_from_instance
 from nanotron.serialize.metadata import TrainingMetadata, save_meta
 from nanotron.serialize.optimizer import (
     save_lr_scheduler,
@@ -31,7 +32,7 @@ from nanotron.serialize.weights import save_weights
 We're going to use safetensors. The reason is that loading segments is going to be much easier
 
 Requirements:
- - serialized format need to be able to recover the current training state. (random states, weights, optimizer states_
+ - serialized format need to be able to recover the current training state. (random states, weights, optimizer states)
  - serialized format should be topology agnostic. Will makes things much easier with varying topologies
 
 Current way of thinking:
@@ -48,6 +49,7 @@ logger = logging.get_logger(__name__)
 
 def save(
     config: "Config",
+    checkpoint_engine: CheckpointEngine,
     model: nn.Module,
     optimizer: optim.BaseOptimizer,
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
@@ -76,7 +78,12 @@ def save(
         raise e
     try:
         if should_save_model:
-            save_weights(model=model, parallel_context=parallel_context, root_folder=root_folder)
+            save_weights(
+                model=model,
+                parallel_context=parallel_context,
+                root_folder=root_folder,
+                checkpoint_engine=checkpoint_engine,
+            )
     except Exception as e:
         log_rank(
             f"Error while saving weights checkpoint: {e}",
@@ -87,7 +94,12 @@ def save(
         raise e
     try:
         if should_save_optimizer:
-            save_optimizer(optimizer=optimizer, parallel_context=parallel_context, root_folder=root_folder)
+            save_optimizer(
+                optimizer=optimizer,
+                parallel_context=parallel_context,
+                root_folder=root_folder,
+                checkpoint_engine=checkpoint_engine
+            )
     except Exception as e:
         log_rank(
             f"Error while saving optimizer checkpoint: {e}",
@@ -108,6 +120,7 @@ def save(
                 is_zero=config.optimizer.zero_stage,
                 parallel_context=parallel_context,
                 root_folder=root_folder,
+                checkpoint_engine=checkpoint_engine,
             )
     except Exception as e:
         log_rank(
@@ -118,7 +131,12 @@ def save(
         )
         raise e
 
-    save_meta(root_folder=root_folder, parallel_context=parallel_context, training_metadata=training_metadata)
+    save_meta(
+        checkpointing_engine_type=get_checkpoint_engine_type_from_instance(checkpoint_engine),
+        root_folder=root_folder,
+        parallel_context=parallel_context,
+        training_metadata=training_metadata
+    )
 
     # TODO @thomas21: sanity check, not sure whether that needs to happen at testing or now (depends how much it costs)
     ###
@@ -180,7 +198,7 @@ def save(
             current_rank = dist.get_rank(group)
 
             for name, tensor in optim_state.items():
-                # FIXME @thomasw21: Some data is actually on `cpu`, just for this test we most it to `cuda`
+                # FIXME @thomasw21: Some data is actually on `cpu`, just for this test we move it to `cuda`
                 tensor = tensor.to("cuda")
 
                 if current_rank == reference_rank:

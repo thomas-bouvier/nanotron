@@ -9,6 +9,7 @@ from dacite import from_dict
 from packaging.version import Version
 
 from nanotron import distributed as dist
+from nanotron.config import CheckpointingEngineType
 from nanotron.constants import CHECKPOINT_FILE_NAME, CHECKPOINT_VERSION
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import SlicesPair
@@ -60,6 +61,7 @@ class TrainingMetadata:
 
 @dataclasses.dataclass
 class CheckpointMetadata:
+    checkpointing_engine_type: CheckpointingEngineType
     version: Version
     tp: int
     dp: int
@@ -71,15 +73,18 @@ class CheckpointMetadata:
 class TensorMetadata:
     # Mandatory for checkpoint version higher than 1.2
     version: Version
+    # The dtype of the tensor
+    dtype: torch.dtype
     # Anything users want to store
     # Info of to what slice of the unsharded tensor (global_slices) the current sharded tensor corresponds (local_slices)
-    local_global_slices_pairs: Tuple[SlicesPair, ...]
+    local_global_slices_pairs: Optional[Tuple[SlicesPair, ...]] = None
     # The shape of the unsharded tensor
-    unsharded_shape: Tuple[int, ...]
+    unsharded_shape: Optional[Tuple[int, ...]] = None
 
     _metadata_config: ClassVar[dacite.Config] = dacite.Config(
         cast=[Version],
         type_hooks={
+            torch.dtype: lambda x: getattr(torch, x.split('.')[1]),
             Tuple[SlicesPair, ...]: SlicesPair.tuple_from_str,
             Tuple[int, ...]: lambda x: torch.Size(int(size) for size in x.strip("()").split(",") if size),
         },
@@ -89,9 +94,12 @@ class TensorMetadata:
     def to_str_dict(self) -> Dict[str, str]:
         return {
             "version": str(self.version),
-            "local_global_slices_pairs": SlicesPair.tuple_to_str(self.local_global_slices_pairs),
-            "unsharded_shape": str(tuple(self.unsharded_shape)),
+            "dtype": str(self.dtype),
         }
+        if self.local_global_slices_pairs is not None:
+            result["local_global_slices_pairs"] = SlicesPair.tuple_to_str(self.local_global_slices_pairs)
+        if self.unsharded_shape is not None:
+            result["unsharded_shape"] = str(tuple(self.unsharded_shape))
 
     @classmethod
     def from_str_dict(cls, dictionary: Dict[str, str]) -> "TensorMetadata":
@@ -125,7 +133,7 @@ def to_list(list_: Union[List, Tuple], type_hooks: Dict[Type, Callable[[Any], An
     return list_.__class__((process_type(elt, type_hooks=type_hooks) for elt in list_))
 
 
-def save_meta(parallel_context: ParallelContext, root_folder: Path, training_metadata: TrainingMetadata):
+def save_meta(checkpointing_engine_type: CheckpointingEngineType, parallel_context: ParallelContext, root_folder: Path, training_metadata: TrainingMetadata):
     assert isinstance(training_metadata, TrainingMetadata)
 
     if dist.get_rank(parallel_context.world_pg) != 0:
@@ -133,6 +141,7 @@ def save_meta(parallel_context: ParallelContext, root_folder: Path, training_met
 
     root_folder.mkdir(exist_ok=True, parents=True)
     checkpoint_metadata = CheckpointMetadata(
+        checkpointing_engine_type=checkpointing_engine_type,
         version=CHECKPOINT_VERSION,
         tp=parallel_context.tp_pg.size(),
         dp=parallel_context.dp_pg.size(),
@@ -153,7 +162,7 @@ def load_meta(parallel_context: ParallelContext, root_folder: Path) -> Checkpoin
             data_class=CheckpointMetadata,
             data=checkpoint_metadata,
             config=dacite.Config(
-                cast=[Version],
+                cast=[CheckpointingEngineType, Version],
             ),
         )
         # Assume that we're always backward compatible, we only increment CHECKPOINT_VERSION when there's a breaking change.

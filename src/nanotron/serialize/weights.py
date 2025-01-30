@@ -4,17 +4,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import dacite
 import torch
 from packaging.version import Version
-from safetensors.torch import safe_open, save_file
+from safetensors.torch import safe_open
 from torch import nn
 from tqdm import tqdm
 
 from nanotron import distributed as dist
 from nanotron import logging
+from nanotron.config import CheckpointingEngineType
 from nanotron.constants import CHECKPOINT_VERSION
 from nanotron.distributed import get_global_rank
 from nanotron.logging import log_rank
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter, ShardedInfo, SlicesPair
+from nanotron.serialize.engine import CheckpointEngine, get_checkpoint_engine_type_from_instance
 from nanotron.serialize.metadata import CheckpointMetadata, TensorMetadata, load_meta
 from nanotron.serialize.utils import (
     ObjectType,
@@ -27,11 +29,16 @@ from nanotron.serialize.utils import (
 logger = logging.get_logger(__name__)
 
 
-def save_weights(model: nn.Module, parallel_context: ParallelContext, root_folder: Path):
+def save_weights(
+    model: nn.Module,
+    parallel_context: ParallelContext,
+    root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
+):
     root_folder = root_folder / "model"
 
     # We save only `dist.get_rank(parallel_context.dp_pg) == 0`
-    # TODO @thomasw21: Figure how this works with Zero-3
+    # TODO @thomasw21: Figure out how this works with Zero-3
     if dist.get_rank(parallel_context.dp_pg) != 0:
         return
 
@@ -55,7 +62,6 @@ def save_weights(model: nn.Module, parallel_context: ParallelContext, root_folde
             param = None
 
         if isinstance(param, NanotronParameter):
-            metadata = {}
             if param.is_tied:
                 tied_info = param.get_tied_info()
                 base_name = tied_info.get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
@@ -78,6 +84,7 @@ def save_weights(model: nn.Module, parallel_context: ParallelContext, root_folde
                 is_expert_sharded = sharded_info.is_expert_sharded(parallel_context)
                 metadata = TensorMetadata(
                     version=CHECKPOINT_VERSION,
+                    dtype=param_or_buffer.dtype,
                     local_global_slices_pairs=sharded_info.local_global_slices_pairs,
                     unsharded_shape=sharded_info.unsharded_shape,
                 ).to_str_dict()
@@ -85,18 +92,23 @@ def save_weights(model: nn.Module, parallel_context: ParallelContext, root_folde
             else:
                 exp_tp_pp_rank_and_size = None
                 is_expert_sharded = False
+                metadata = TensorMetadata(
+                    version=CHECKPOINT_VERSION,
+                    dtype=param_or_buffer.dtype,
+                ).to_str_dict()
 
             path = get_path(
                 base_name,
                 type=ObjectType.MODEL,
                 exp_tp_pp_rank_and_size=exp_tp_pp_rank_and_size,
                 is_expert_sharded=is_expert_sharded,
+                checkpoint_engine=checkpoint_engine,
                 prefix=root_folder,
             )
             path.parent.mkdir(exist_ok=True, parents=True)
             try:
-                tensors = {"data": param_or_buffer}
-                save_file(tensors=tensors, filename=path, metadata=metadata)
+                state_dict = {"data": param_or_buffer}
+                checkpoint_engine.save(state_dict, path, metadata=metadata)
             except Exception as e:
                 log_rank(
                     f"Error saving {path} with {metadata}",
@@ -146,6 +158,17 @@ def get_checkpoint_version(parallel_context, root_folder, param_save_path: Path)
     return checkpoint_version
 
 
+def read_checkpoint_engine_type_from_meta(parallel_context: ParallelContext, root_folder: Path) -> CheckpointingEngineType:
+    checkpoint_metadata: CheckpointMetadata = load_meta(parallel_context=parallel_context, root_folder=root_folder)
+    return checkpoint_metadata.checkpointing_engine_type
+
+
+def get_checkpoint_engine_type(parallel_context, root_folder: Path) -> CheckpointingEngineType:
+    return read_checkpoint_engine_type_from_meta(
+        parallel_context=parallel_context, root_folder=root_folder
+    )
+
+
 def load_sharded_param_latest(
     param_or_buffer: torch.Tensor,
     sharded_info: ShardedInfo,
@@ -191,6 +214,7 @@ def load_weights(
     model: nn.Module,
     parallel_context: ParallelContext,
     root_folder: Path,
+    checkpoint_engine: CheckpointEngine,
     filtered_state_dict: Optional[Dict[str, Any]] = None,
 ):
     """Load weights from a checkpoint
@@ -201,6 +225,13 @@ def load_weights(
         root_folder: root folder of the checkpoint
         filtered_state_dict: state dict to load from (overrides model.state_dict()). if None, load from model.state_dict()
     """
+    # Reading which checkpointing engine was used
+    meta_checkpoint_engine_type = get_checkpoint_engine_type(
+        parallel_context, root_folder
+    )
+    if get_checkpoint_engine_type_from_instance(checkpoint_engine) != meta_checkpoint_engine_type:
+        raise RuntimeError(f"The checkpoint engine {meta_checkpoint_engine_type}, which was used to save states, is not currently active.")
+
     param_root_folder = root_folder / "model"
 
     module_id_to_prefix = {id(module): f"{module_name}." for module_name, module in model.named_modules()}
@@ -254,14 +285,14 @@ def load_weights(
                 base_name,
                 type=ObjectType.MODEL,
                 exp_tp_pp_rank_and_size=exp_tp_pp_rank_and_size,
-                prefix=param_root_folder,
                 is_expert_sharded=is_expert_sharded,
+                checkpoint_engine=checkpoint_engine,
+                prefix=param_root_folder,
             )
 
             if path.exists():
-                with safe_open(path, framework="pt", device=str(param.device)) as fi:
-                    # TODO @thomasw21: Choose only a slice if we switch the TP topology
-                    param_or_buffer[:] = fi.get_tensor("data")
+                # TODO @thomasw21: Choose only a slice if we switch the TP topology
+                 param_or_buffer[:] = checkpoint_engine.load(path, framework="pt", device=str(param.device))
 
             elif not path.parent.exists():
                 raise ValueError(
@@ -312,7 +343,7 @@ def load_weights(
                         param_shard_metadata=param_shard_metadata[name],
                     )
                 else:
-                    raise ValueError(f"Unsupported checkpoint version {checkpoint_version}")
+                    raise RuntimeError(f"Unsupported checkpoint version {checkpoint_version}")
 
         else:
             raise NotImplementedError(f"Parameters {param} should be a NanotronParameter")

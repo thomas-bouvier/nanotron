@@ -11,6 +11,7 @@ from dacite import from_dict
 from datasets.download.streaming_download_manager import xPath
 from yaml.loader import SafeLoader
 
+from nanotron.config.checkpoints_config import CheckpointingEngineType, is_valid_checkpointing_engine_type
 from nanotron.config.lighteval_config import LightEvalConfig
 from nanotron.config.models_config import ExistingCheckpointInit, NanotronConfigs, RandomInit, SpectralMupInit
 from nanotron.config.parallelism_config import ParallelismArgs
@@ -147,15 +148,30 @@ class DatasetStageArgs:
 
 
 @dataclass
+class DataStatesArgs:
+    """Arguments related to DataStates, an asynchronous
+    checkpointing engine more efficient than torch.save()
+    host_cache_size: how much memory should be allocated for the host cache
+    parser_threads: number of threads used to parse tensors' metadata
+    pin_host_cache: whether the host cache memory should be pinned
+    """
+
+    host_cache_size: int
+    parser_threads: int
+    pin_host_cache: bool
+
+
+@dataclass
 class CheckpointsArgs:
     """Arguments related to checkpoints:
     checkpoints_path: where to save the checkpoints
     checkpoint_interval: how often to save the checkpoints
-    resume_checkpoint_path: if you want to load from a specific checkpoint path
+    resume_checkpoint_path: whether you want to load from a specific checkpoint path
     """
 
     checkpoints_path: Path
     checkpoint_interval: int
+    checkpointing_engine: Union[str, CheckpointingEngineType] = CheckpointingEngineType.TORCH
     save_initial_state: Optional[bool] = False
     save_final_state: Optional[bool] = False
     resume_checkpoint_path: Optional[xPath] = None
@@ -166,6 +182,10 @@ class CheckpointsArgs:
     def __post_init__(self):
         if isinstance(self.checkpoints_path, str):
             self.checkpoints_path = xPath(self.checkpoints_path)
+        if isinstance(self.checkpointing_engine, str):
+            assert is_valid_checkpointing_engine_type(self.checkpointing_engine), \
+                f"{self.checkpointing_engine} is not a valid checkpointing engine type"
+            self.checkpointing_engine = CheckpointingEngineType[self.checkpointing_engine.upper()]
         if isinstance(self.resume_checkpoint_path, str):
             self.resume_checkpoint_path = xPath(self.resume_checkpoint_path)
 
@@ -346,6 +366,7 @@ class Config:
     model: ModelArgs
     tokenizer: TokenizerArgs
     checkpoints: Optional[CheckpointsArgs] = None
+    datastates: Optional[DataStatesArgs] = None
     logging: Optional[LoggingArgs] = None
     tokens: Optional[TokensArgs] = None
     optimizer: Optional[OptimizerArgs] = None
@@ -447,6 +468,7 @@ def get_config_from_dict(
             cast=[Path],
             type_hooks={
                 torch.dtype: cast_str_to_torch_dtype,
+                CheckpointingEngineType: lambda x: CheckpointingEngineType[x.upper()],
                 PipelineEngine: cast_str_to_pipeline_engine,
                 TensorParallelLinearMode: lambda x: TensorParallelLinearMode[x.upper()],
                 RecomputeGranularity: lambda x: RecomputeGranularity[x.upper()],
