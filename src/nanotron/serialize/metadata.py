@@ -10,10 +10,9 @@ from packaging.version import Version
 
 from nanotron import distributed as dist
 from nanotron.config import CheckpointingEngineType
-from nanotron.constants import CHECKPOINT_FILE_NAME, CHECKPOINT_VERSION
+from nanotron.constants import CHECKPOINT_FILE_NAME
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import SlicesPair
-
 
 @dataclasses.dataclass
 class DataStageMetadata:
@@ -73,8 +72,6 @@ class CheckpointMetadata:
 class TensorMetadata:
     # Mandatory for checkpoint version higher than 1.2
     version: Version
-    # The dtype of the tensor
-    dtype: torch.dtype
     # Anything users want to store
     # Info of to what slice of the unsharded tensor (global_slices) the current sharded tensor corresponds (local_slices)
     local_global_slices_pairs: Optional[Tuple[SlicesPair, ...]] = None
@@ -84,7 +81,6 @@ class TensorMetadata:
     _metadata_config: ClassVar[dacite.Config] = dacite.Config(
         cast=[Version],
         type_hooks={
-            torch.dtype: lambda x: getattr(torch, x.split('.')[1]),
             Tuple[SlicesPair, ...]: SlicesPair.tuple_from_str,
             Tuple[int, ...]: lambda x: torch.Size(int(size) for size in x.strip("()").split(",") if size),
         },
@@ -94,7 +90,6 @@ class TensorMetadata:
     def to_str_dict(self) -> Dict[str, str]:
         return {
             "version": str(self.version),
-            "dtype": str(self.dtype),
         }
         if self.local_global_slices_pairs is not None:
             result["local_global_slices_pairs"] = SlicesPair.tuple_to_str(self.local_global_slices_pairs)
@@ -133,7 +128,7 @@ def to_list(list_: Union[List, Tuple], type_hooks: Dict[Type, Callable[[Any], An
     return list_.__class__((process_type(elt, type_hooks=type_hooks) for elt in list_))
 
 
-def save_meta(checkpointing_engine_type: CheckpointingEngineType, parallel_context: ParallelContext, root_folder: Path, training_metadata: TrainingMetadata):
+def save_meta(checkpoint_engine_type: CheckpointingEngineType, checkpoint_engine_version: Version, parallel_context: ParallelContext, root_folder: Path, training_metadata: TrainingMetadata):
     assert isinstance(training_metadata, TrainingMetadata)
 
     if dist.get_rank(parallel_context.world_pg) != 0:
@@ -141,8 +136,8 @@ def save_meta(checkpointing_engine_type: CheckpointingEngineType, parallel_conte
 
     root_folder.mkdir(exist_ok=True, parents=True)
     checkpoint_metadata = CheckpointMetadata(
-        checkpointing_engine_type=checkpointing_engine_type,
-        version=CHECKPOINT_VERSION,
+        checkpointing_engine_type=checkpoint_engine_type,
+        version=checkpoint_engine_version,
         tp=parallel_context.tp_pg.size(),
         dp=parallel_context.dp_pg.size(),
         metas=training_metadata,
@@ -155,7 +150,7 @@ def save_meta(checkpointing_engine_type: CheckpointingEngineType, parallel_conte
         json.dump(processed_metadata, fo, indent=2, sort_keys=True)
 
 
-def load_meta(parallel_context: ParallelContext, root_folder: Path) -> CheckpointMetadata:
+def load_meta(checkpoint_engine_type: CheckpointingEngineType, checkpoint_engine_version: Version, parallel_context: ParallelContext, root_folder: Path) -> CheckpointMetadata:
     with open(root_folder / CHECKPOINT_FILE_NAME, mode="r") as fi:
         checkpoint_metadata = json.load(fi)
         checkpoint_metadata = from_dict(
@@ -165,8 +160,11 @@ def load_meta(parallel_context: ParallelContext, root_folder: Path) -> Checkpoin
                 cast=[CheckpointingEngineType, Version],
             ),
         )
-        # Assume that we're always backward compatible, we only increment CHECKPOINT_VERSION when there's a breaking change.
         assert (
-            checkpoint_metadata.version <= CHECKPOINT_VERSION
-        ), f"Checkpoint is of version {checkpoint_metadata.version}, Current `nanotron` checkpoint version is {CHECKPOINT_VERSION}"
+            checkpoint_metadata.checkpointing_engine_type == checkpoint_engine_type
+        ), f"Checkpoint has been saved using {checkpoint_metadata.checkpointing_engine_type}, Current checkpoint engine is {checkpoint_engine_type}"
+        # Assume that we're always backward compatible, we only increment CheckpointEngine.CHECKPOINT_VERSION when there's a breaking change.
+        assert (
+            checkpoint_metadata.version <= checkpoint_engine_version
+        ), f"Checkpoint is of version {checkpoint_metadata.version}, Current `nanotron` checkpoint version is {checkpoint_engine_version}"
     return checkpoint_metadata

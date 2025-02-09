@@ -11,7 +11,6 @@ from tqdm import tqdm
 from nanotron import distributed as dist
 from nanotron import logging
 from nanotron.config import CheckpointingEngineType
-from nanotron.constants import CHECKPOINT_VERSION
 from nanotron.distributed import get_global_rank
 from nanotron.logging import log_rank
 from nanotron.parallel import ParallelContext
@@ -62,6 +61,7 @@ def save_weights(
             param = None
 
         if isinstance(param, NanotronParameter):
+            metadata = {}
             if param.is_tied:
                 tied_info = param.get_tied_info()
                 base_name = tied_info.get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
@@ -83,8 +83,7 @@ def save_weights(
                 )
                 is_expert_sharded = sharded_info.is_expert_sharded(parallel_context)
                 metadata = TensorMetadata(
-                    version=CHECKPOINT_VERSION,
-                    dtype=param_or_buffer.dtype,
+                    version=checkpoint_engine.CHECKPOINT_VERSION,
                     local_global_slices_pairs=sharded_info.local_global_slices_pairs,
                     unsharded_shape=sharded_info.unsharded_shape,
                 ).to_str_dict()
@@ -92,10 +91,6 @@ def save_weights(
             else:
                 exp_tp_pp_rank_and_size = None
                 is_expert_sharded = False
-                metadata = TensorMetadata(
-                    version=CHECKPOINT_VERSION,
-                    dtype=param_or_buffer.dtype,
-                ).to_str_dict()
 
             path = get_path(
                 base_name,
@@ -136,13 +131,20 @@ def read_checkpoint_version_from_shard_file(param_save_path: Path) -> Version:
     return checkpoint_version
 
 
-def read_checkpoint_version_from_meta(parallel_context: ParallelContext, root_folder: Path) -> Version:
-    checkpoint_metadata: CheckpointMetadata = load_meta(parallel_context=parallel_context, root_folder=root_folder)
+def read_checkpoint_version_from_meta(
+    checkpoint_engine: CheckpointEngine,
+    parallel_context: ParallelContext,
+    root_folder: Path
+) -> Version:
+    checkpoint_metadata: CheckpointMetadata = load_meta(
+        checkpoint_engine_type=get_checkpoint_engine_type_from_instance(checkpoint_engine),
+        checkpoint_engine_version=checkpoint_engine.CHECKPOINT_VERSION,
+        parallel_context=parallel_context, root_folder=root_folder)
     checkpoint_version = checkpoint_metadata.version
     return checkpoint_version
 
 
-def get_checkpoint_version(parallel_context, root_folder, param_save_path: Path) -> Version:
+def get_checkpoint_version(checkpoint_engine, parallel_context, root_folder, param_save_path: Path) -> Version:
     try:
         checkpoint_version = read_checkpoint_version_from_shard_file(param_save_path=param_save_path)
     except CheckpointVersionFromShardFileException:
@@ -153,19 +155,28 @@ def get_checkpoint_version(parallel_context, root_folder, param_save_path: Path)
             rank=0,
         )
         checkpoint_version = read_checkpoint_version_from_meta(
-            parallel_context=parallel_context, root_folder=root_folder
+            checkpoint_engine=checkpoint_engine, parallel_context=parallel_context, root_folder=root_folder
         )
     return checkpoint_version
 
 
-def read_checkpoint_engine_type_from_meta(parallel_context: ParallelContext, root_folder: Path) -> CheckpointingEngineType:
-    checkpoint_metadata: CheckpointMetadata = load_meta(parallel_context=parallel_context, root_folder=root_folder)
+def read_checkpoint_engine_type_from_meta(
+    checkpoint_engine: CheckpointEngine,
+    parallel_context: ParallelContext,
+    root_folder: Path
+) -> CheckpointingEngineType:
+    checkpoint_metadata: CheckpointMetadata = load_meta(
+        checkpoint_engine_type=get_checkpoint_engine_type_from_instance(checkpoint_engine),
+        checkpoint_engine_version=checkpoint_engine.CHECKPOINT_VERSION,
+        parallel_context=parallel_context,
+        root_folder=root_folder
+    )
     return checkpoint_metadata.checkpointing_engine_type
 
 
-def get_checkpoint_engine_type(parallel_context, root_folder: Path) -> CheckpointingEngineType:
+def get_checkpoint_engine_type(checkpoint_engine: CheckpointEngine, parallel_context, root_folder: Path) -> CheckpointingEngineType:
     return read_checkpoint_engine_type_from_meta(
-        parallel_context=parallel_context, root_folder=root_folder
+        checkpoint_engine=checkpoint_engine, parallel_context=parallel_context, root_folder=root_folder
     )
 
 
@@ -227,7 +238,7 @@ def load_weights(
     """
     # Reading which checkpointing engine was used
     meta_checkpoint_engine_type = get_checkpoint_engine_type(
-        parallel_context, root_folder
+        checkpoint_engine, parallel_context, root_folder
     )
     if get_checkpoint_engine_type_from_instance(checkpoint_engine) != meta_checkpoint_engine_type:
         raise RuntimeError(f"The checkpoint engine {meta_checkpoint_engine_type}, which was used to save states, is not currently active.")
@@ -319,7 +330,7 @@ def load_weights(
 
                 if checkpoint_version is None:
                     checkpoint_version = get_checkpoint_version(
-                        parallel_context, root_folder, param_save_path=shards_path[0]
+                        checkpoint_engine, parallel_context, root_folder, param_save_path=shards_path[0]
                     )
                 else:
                     current_checkpoint_version = None
@@ -335,7 +346,7 @@ def load_weights(
                             current_checkpoint_version == checkpoint_version
                         ), f"Checkpoint version mismatch at {shards_path[0]}."
 
-                if checkpoint_version <= CHECKPOINT_VERSION:
+                if checkpoint_version <= checkpoint_engine.CHECKPOINT_VERSION:
                     load_sharded_param_latest(
                         param_or_buffer=param_or_buffer,
                         sharded_info=sharded_info,

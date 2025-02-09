@@ -132,7 +132,8 @@ def save(
         raise e
 
     save_meta(
-        checkpointing_engine_type=get_checkpoint_engine_type_from_instance(checkpoint_engine),
+        checkpoint_engine_type=get_checkpoint_engine_type_from_instance(checkpoint_engine),
+        checkpoint_engine_version=checkpoint_engine.CHECKPOINT_VERSION,
         root_folder=root_folder,
         parallel_context=parallel_context,
         training_metadata=training_metadata

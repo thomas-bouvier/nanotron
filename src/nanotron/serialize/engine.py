@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+from packaging.version import Version
+from pathlib import Path
 from typing import Any, Optional, Type, Dict
 
 import ctypes
 import json
+import numpy as np
+import pickle
 import torch
 from safetensors.torch import safe_open, save_file
 
@@ -15,24 +19,25 @@ from nanotron.serialize.metadata import TensorMetadata
 logger = logging.get_logger(__name__)
 
 SIZE_UINT64 = ctypes.sizeof(ctypes.c_uint64)
+KEY_SEPARATOR = "|"
 
 
 class CheckpointEngine(ABC):
+    CHECKPOINT_VERSION: Version
+
+    def __init__(self, config: Optional[dict] = None):
+        self.config = config
 
     @abstractmethod
-    def save_unsafe(self, state_dict: Dict[str, Any], path: str) -> None:
+    def save(self, state_dict: Dict[str, Any], path: Path, metadata: Optional[TensorMetadata] = None) -> None:
         pass
 
     @abstractmethod
-    def save(self, state_dict: Dict[str, Any], path: str, metadata: dict) -> None:
+    def load_unsafe(self, path: Path, map_location: Optional[str] = None) -> None:
         pass
 
     @abstractmethod
-    def load_unsafe(self, path: str, map_location: Optional[str] = None) -> None:
-        pass
-
-    @abstractmethod
-    def load(self, path: str, framework="pt", device="cpu") -> None:
+    def load(self, path: Path, framework="pt", device="cpu") -> None:
         pass
 
     @abstractmethod
@@ -41,27 +46,31 @@ class CheckpointEngine(ABC):
 
 
 class TorchCheckpointEngine(CheckpointEngine):
+    CHECKPOINT_VERSION = Version("1.4")
     TENSOR_SUFFIX = "safetensors"
 
-    def __init__(self, config: Optional[dict] = None):
+    def __init__(self, config: Optional[Dict] = None):
         self.config = config
 
-    def save_unsafe(self, state_dict: Dict[str, Any], path: str) -> None:
+    def _save_unsafe(self, state_dict: Dict[str, Any], path: Path) -> None:
         torch.save(state_dict, path)
 
-    def save(self, state_dict: Dict[str, Any], path: str, metadata: dict) -> None:
+    def save(self, state_dict: Dict[str, Any], path: Path, metadata: Optional[TensorMetadata] = None) -> None:
         logger.debug(f"Saving checkpoint {path}...")
 
-        if "data" in state_dict:
-            save_file(tensors=state_dict, filename=path, metadata=metadata)
+        if metadata is not None:
+            if "data" in state_dict:
+                save_file(tensors=state_dict, filename=path, metadata=metadata.to_str_dict())
+            else:
+                raise Exception(f"The state_dict given to checkpoint must contain a data field as tensor metadata was passed")
         else:
-            raise Exception(f"The state_dict given to checkpoint must contain a data field.")
+            self._save_unsafe(state_dict, path)
 
-    def load_unsafe(self, path: str, map_location: Optional[str] = None) -> None:
+    def load_unsafe(self, path: Path, map_location: Optional[str] = None) -> None:
         logger.debug(f"Loading checkpoint from {path}...")
         return torch.load(path, map_location=map_location)
 
-    def load(self, path: str, framework="pt", device: str = "cpu") -> None:
+    def load(self, path: Path, framework="pt", device: str = "cpu") -> None:
         logger.debug(f"Loading checkpoint from {path}...")
         with safe_open(path, framework, device=device) as fi:
             return fi.get_tensor("data")
@@ -71,11 +80,12 @@ class TorchCheckpointEngine(CheckpointEngine):
 
 
 class DataStatesCheckpointEngine(CheckpointEngine):
+    CHECKPOINT_VERSION = Version("1.0")
     TENSOR_SUFFIX = "datastates"
 
     engine = None
 
-    def __init__(self, config: Optional[dict] = None):
+    def __init__(self, config: Optional[Dict] = None):
         self.config = config
 
         try:

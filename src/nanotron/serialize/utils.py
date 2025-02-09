@@ -1,7 +1,7 @@
 import re
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -35,7 +35,7 @@ def get_path(
     is_expert_sharded: bool,
     checkpoint_engine: CheckpointEngine,
     prefix: Optional[Path] = None,
-) -> List[str]:
+) -> Union[List[str], Path]:
     suffix = tensor_name.split(".")
     suffix_path, suffix_name = suffix[:-1], suffix[-1]
 

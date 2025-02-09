@@ -100,7 +100,7 @@ def save_optimizer(
 
             json.dump(config, fo)
 
-    checkpoint_engine.save_unsafe(
+    checkpoint_engine.save(
         optimizer.state_dict(),
         root_folder
         / optimizer_filename(parallel_context, is_zero=optimizer.inherit_from(optim.ZeroDistributedOptimizer)),
@@ -122,7 +122,7 @@ def save_lr_scheduler(
     root_folder = root_folder / "lr_scheduler"
     root_folder.mkdir(exist_ok=True, parents=True)
 
-    checkpoint_engine.save_unsafe(
+    checkpoint_engine.save(
         lr_scheduler.state_dict(),
         root_folder / lr_scheduler_filename(parallel_context, is_zero),
     )

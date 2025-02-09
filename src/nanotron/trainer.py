@@ -170,7 +170,7 @@ class DistributedTrainer:
         try:
             self.checkpoint_engine = create_checkpoint_engine_class(self.checkpoint_engine_type)(
                 # TODO @tbouvier: make it generic to all checkpointing engines
-                config=self.config.datastates if self.config.datastates else None
+                config=asdict(self.config.datastates) if self.config.datastates else None
             )
         except ImportError as e:
             log_rank(
@@ -180,7 +180,7 @@ class DistributedTrainer:
                 rank=0,
             )
             # TODO tbouvier: same
-            self.checkpoint_engine = TorchCheckpointEngine(config=self.config.datastates if self.config.datastates else None)
+            self.checkpoint_engine = TorchCheckpointEngine(config=asdict(self.config.datastates) if self.config.datastates else None)
 
         ########################################
         ## Setting up our model, optimizers, schedulers, etc.
@@ -242,7 +242,9 @@ class DistributedTrainer:
         # Define iteration start state
         if self.init_checkpoint_path is not None and self.config.checkpoints.load_lr_scheduler:
             checkpoint_metadata = load_meta(
-                parallel_context=self.parallel_context, root_folder=self.init_checkpoint_path
+                checkpoint_engine=self.checkpoint_engine,
+                parallel_context=self.parallel_context,
+                root_folder=self.init_checkpoint_path
             )
             assert isinstance(checkpoint_metadata.metas, TrainingMetadata)
             log_rank(str(checkpoint_metadata), logger=logger, level=logging.INFO, rank=0)
