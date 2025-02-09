@@ -115,41 +115,92 @@ class DataStatesCheckpointEngine(CheckpointEngine):
         except Exception as e:
             raise Exception(f"[DataStates] Got an exception during DataStates init: {e}")
 
-    def save_unsafe(self, state_dict: Dict[str, Any], path: str) -> None:
-        torch.save(state_dict, path)
-
-    def save(self, state_dict: Dict[str, Any], path: str, metadata: dict) -> None:
+    def save(self, state_dict: Dict[str, Any], path: Path, metadata: Optional[TensorMetadata] = None) -> None:
         logger.debug(f"[DataStates] Saving checkpoint {path}...")
 
-        if not isinstance(state_dict, (dict, OrderedDict)):
-            raise Exception(f"""
-                [DataStates] state_dict given to checkpoint must be a dictionary.
-                Passed {type(state_dict)} instead for {path}.
-            """)
+        #if not isinstance(state_dict, (dict, OrderedDict, RandomStates)):
+        #    raise Exception(f"[DataStates] state_dict given to checkpoint must be a dictionary. Passed {type(state_dict)} instead for {path}.")
 
-        if "data" in state_dict:
-            if metadata is None:
-                raise Exception(f"[DataStates] saving a state_dict containing a tensor requires metadata to be defined.")
+        if metadata is not None:
+            if "data" not in state_dict:
+                raise Exception(f"The state_dict given to checkpoint must contain a data field as tensor metadata was passed")
 
-            header = json.dumps(metadata).encode("utf-8")
-            header_size = len(header).to_bytes(SIZE_UINT64, 'little') # force the header size to take 8 bytes
-            metadata_size = len(header_size) + len(header)
+        header = {}
+        async_copies = {}
+        _start_tensor_offset = 0
+        _end_tensor_offset = 0
 
-            # Launch asynchronous copies
-            async_ckpt_list = [(metadata["version"], state_dict["data"], metadata_size, str(path))]
-            self.engine.async_save(async_ckpt_list)
+        def _parse_state(key, data):
+            nonlocal _start_tensor_offset, _end_tensor_offset
+            try:
+                if torch.is_tensor(data):
+                    tensor_size = data.numel() * data.element_size()
+                    _end_tensor_offset += tensor_size
 
-            # Writing the metadata at the beginning of the file, without waiting
-            with open(path, 'wb') as f:
-                f.seek(0)
-                f.write(header_size)
-                f.write(header)
-        
-        else:
-            raise Exception(f"[DataStates] The state_dict given to checkpoint must contain a data field.")
+                    header[key] = {
+                        "dtype": str(data.dtype),
+                        "shape": tuple(data.shape),
+                        "data_offsets": [_start_tensor_offset, _end_tensor_offset],
+                    }
+                    if key == "data":
+                        header[key].update(**(metadata.to_str_dict() if metadata is not None else {}))
 
-    def load_unsafe(self, path: str, map_location: Optional[str] = None) -> None:
-        raise NotImplementedError
+                    data = data.contiguous()
+                    async_copies[key] = {
+                        "tensor": data,
+                        "file_offset": _start_tensor_offset
+                    }
+                    _start_tensor_offset = _end_tensor_offset
+                    snapshot = f"TENSOR{KEY_SEPARATOR}{key}"
+
+                elif isinstance(data, list):
+                    snapshot = [None] * len(data)
+                    for (idx, ele) in enumerate(data):
+                        new_key = f"{key}{KEY_SEPARATOR}{idx}" if len(key) else f"{idx}"
+                        snapshot[idx] = _parse_state(new_key, ele)
+
+                elif isinstance(data, (dict, OrderedDict)):
+                    snapshot = {}
+                    for (k, v) in data.items():
+                        new_key = f"{key}{KEY_SEPARATOR}{k}" if len(key) else f"{k}"
+                        snapshot[k] = _parse_state(new_key, v)
+
+                else:
+                    snapshot = data
+
+                return snapshot
+
+            except Exception as exc:
+                raise Exception(f"[DataStates] Cannot parse {key}, exception: {exc}, data is {data}")
+
+        lean_state_dict = pickle.dumps(_parse_state("", state_dict), protocol=pickle.HIGHEST_PROTOCOL)
+        _end_tensor_offset += len(lean_state_dict)
+
+        header.update({
+            "datastates_metadata": {
+                "data_offsets": [_start_tensor_offset, _end_tensor_offset],
+            }
+        })
+        enc_header = json.dumps(header).encode("utf-8")
+        enc_header_size = len(enc_header).to_bytes(SIZE_UINT64, 'little') # force the header size to take 8 bytes
+        metadata_size = len(enc_header_size) + len(enc_header)
+
+        # Launch asynchronous copies
+        async_ckpt_list = []
+        for _, v in async_copies.items():
+            # We offset file_offsets by metadata_size
+            v["file_offset"] += metadata_size
+            async_ckpt_list.append((str(self.CHECKPOINT_VERSION), v["tensor"], v["file_offset"], str(path)))
+
+        self.engine.async_save(async_ckpt_list)
+
+        with open(path, 'wb') as f:
+            f.seek(0)
+            f.write(enc_header_size)
+            f.write(enc_header)
+            # Write the lean state dict towards the end of the file
+            f.seek(_start_tensor_offset + metadata_size)
+            f.write(lean_state_dict)
 
     def load(self, path: str, framework="pt", device: str = "cpu") -> None:
         raise NotImplementedError

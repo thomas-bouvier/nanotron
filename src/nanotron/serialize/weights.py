@@ -61,7 +61,7 @@ def save_weights(
             param = None
 
         if isinstance(param, NanotronParameter):
-            metadata = {}
+            metadata = None
             if param.is_tied:
                 tied_info = param.get_tied_info()
                 base_name = tied_info.get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
@@ -86,7 +86,7 @@ def save_weights(
                     version=checkpoint_engine.CHECKPOINT_VERSION,
                     local_global_slices_pairs=sharded_info.local_global_slices_pairs,
                     unsharded_shape=sharded_info.unsharded_shape,
-                ).to_str_dict()
+                )
 
             else:
                 exp_tp_pp_rank_and_size = None
