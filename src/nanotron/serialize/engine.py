@@ -202,8 +202,67 @@ class DataStatesCheckpointEngine(CheckpointEngine):
             f.seek(_start_tensor_offset + metadata_size)
             f.write(lean_state_dict)
 
-    def load(self, path: str, framework="pt", device: str = "cpu") -> None:
-        raise NotImplementedError
+    def load_unsafe(self, path: Path, map_location: Optional[str] = None) -> None:
+        logger.debug(f"Loading checkpoint from {path}...")
+        return torch.load(path, map_location=map_location)
+
+    def load(self, path: Path, framework="pt", device: str = "cpu") -> None:
+        try:
+            version = 0
+            f = open(path, 'rb')
+            f.seek(0)
+
+            header_size_bytes = f.read(SIZE_UINT64)
+            header_size = int.from_bytes(header_size_bytes, 'little')
+            metadata_size = header_size + SIZE_UINT64
+            header = json.loads(f.read(header_size))
+
+            [start_offset, end_offset] = np.add(header["datastates_metadata"]["data_offsets"], metadata_size)
+            del(header["datastates_metadata"])
+
+            f.seek(start_offset)
+            data = pickle.loads(f.read(end_offset - start_offset))
+
+            try:
+                restore_list = []
+
+                for k, v in header.items():
+                    split_k = deque(k.split(KEY_SEPARATOR))
+                    dtype = v["dtype"]
+                    if dtype.startswith("torch"):
+                        dtype = dtype.replace('torch.', '')
+                    shape = v["shape"]
+                    [start_offset, end_offset] = np.add(v["data_offsets"], metadata_size)
+
+                    pre_dest = data
+                    dest = data
+                    while len(split_k):
+                        sub_k = split_k.popleft()
+                        if sub_k.isdigit():
+                            sub_k = int(sub_k)
+                        pre_dest = dest
+                        dest = dest[sub_k]
+
+                    if dest != f"TENSOR{KEY_SEPARATOR}{k}":
+                        raise Exception(f"[DataStates] The key in header {k} does not match key at location {dest}")
+
+                    tensor_restored = torch.zeros(size=tuple(shape), dtype=getattr(torch, dtype))
+                    restore_list.append((version, tensor_restored, start_offset, str(path)))
+
+                    f.seek(start_offset)
+                    buffer = f.read(end_offset - start_offset)
+                    tensor_restored = torch.frombuffer(buffer, dtype=getattr(torch, dtype)).reshape(tuple(shape))
+                    pre_dest[sub_k] = tensor_restored
+
+                self.engine.load(restore_list)
+
+            except Exception as exc:
+                raise Exception(f"[DataStates] Got error with tensor loading {dtype}, {shape}, {exc}")
+                self.logger.info(f"[DataStates] Loaded checkpoint from {path}.")
+                return data
+
+        except Exception as exc:
+            logger.error(f"[DataStates][ERROR] Could not load {path}, exception: {exc}")
 
     def wait(self) -> None:
         return self.engine.wait()
