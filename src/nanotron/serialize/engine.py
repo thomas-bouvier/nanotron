@@ -58,11 +58,8 @@ class TorchCheckpointEngine(CheckpointEngine):
     def save(self, state_dict: Dict[str, Any], path: Path, metadata: Optional[TensorMetadata] = None) -> None:
         logger.debug(f"Saving checkpoint {path}...")
 
-        if metadata is not None:
-            if "data" in state_dict:
-                save_file(tensors=state_dict, filename=path, metadata=metadata.to_str_dict())
-            else:
-                raise Exception(f"The state_dict given to checkpoint must contain a data field as tensor metadata was passed")
+        if "data" in state_dict:
+            save_file(tensors=state_dict, filename=path, metadata=metadata.to_str_dict() if metadata is not None else {})
         else:
             self._save_unsafe(state_dict, path)
 
