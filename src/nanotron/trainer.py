@@ -97,6 +97,7 @@ from nanotron.serialize.engine import (
     TorchCheckpointEngine,
     DataStatesCheckpointEngine,
     create_checkpoint_engine_class,
+    get_checkpoint_engine_type_from_instance,
 )
 from nanotron.serialize.metadata import DataStageMetadata, TrainingMetadata
 from nanotron.serialize.optimizer import load_optimizer, state_dict_to_device
@@ -242,7 +243,8 @@ class DistributedTrainer:
         # Define iteration start state
         if self.init_checkpoint_path is not None and self.config.checkpoints.load_lr_scheduler:
             checkpoint_metadata = load_meta(
-                checkpoint_engine=self.checkpoint_engine,
+                checkpoint_engine_type=get_checkpoint_engine_type_from_instance(self.checkpoint_engine),
+                checkpoint_engine_version=self.checkpoint_engine.CHECKPOINT_VERSION,
                 parallel_context=self.parallel_context,
                 root_folder=self.init_checkpoint_path
             )
