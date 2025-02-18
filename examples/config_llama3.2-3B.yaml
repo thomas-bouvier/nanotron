@@ -1,16 +1,21 @@
 checkpoints:
   checkpoint_interval: 20
-  checkpoints_path: checkpoints/nanotron_training/Nanotron-Llama-3.2-3B-FT
+  checkpoints_path: checkpoints/Nanotron-Llama-3.2-3B
   checkpoints_path_is_shared_file_system: false
-  resume_checkpoint_path: checkpoints/nanotron_pretrained_checkpoints/Nanotron-Llama-3.2-3B
+  resume_checkpoint_path: pretrained-checkpoints/Nanotron-Llama-3.2-3B
   save_initial_state: false
   load_lr_scheduler: false
   load_optimizer: false
 data_stages:
 - data:
     dataset:
-      dataset_folder: /store/swissai/a06/datasets_tokenized/nanotron/Meta-Llama-3-8B/fineweb-edu-sample-100BT
-    num_loading_workers: 1
+      dataset_overwrite_cache: false
+      dataset_processing_num_proc_per_process: 1
+      hf_dataset_config_name: sample-10BT
+      hf_dataset_or_datasets: HuggingFaceFW/fineweb-edu
+      hf_dataset_splits: train
+      text_column_name: text
+    num_loading_workers: 4
     seed: 42
   name: General purpose training (Single dataset)
   start_training_step: 1
